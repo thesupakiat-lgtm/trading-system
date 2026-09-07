@@ -1,0 +1,747 @@
+//@version=6
+indicator("XAUUSD Gann Price-Time Confluence V7 + Smooth Curves", "Gann P/T V7", overlay = false, max_lines_count = 500, max_labels_count = 500, max_polylines_count = 100, max_bars_back = 2500, precision = 3)
+
+//------------------------------------------------------------------------------
+// Inputs
+//------------------------------------------------------------------------------
+groupSwing = "1. Swing / Cycle"
+pivotLen      = input.int(5, "Pivot confirmation bars", minval = 1, group = groupSwing)
+useAutoCycle  = input.bool(true, "Auto Cycle = median of last 3 same-type swing intervals", group = groupSwing)
+manualCycle   = input.float(40.0, "Fallback / Manual Cycle Length (bars)", minval = 2.0, step = 0.1, group = groupSwing)
+
+// Price map
+groupPrice = "2. COS Price Map"
+showLevels    = input.bool(true, "Show COS 30 / 45 / 60", group = groupPrice)
+showZone      = input.bool(true, "Fill COS30-COS60 candidate zone", group = groupPrice)
+tolerancePct  = input.float(3.0, "Near-zone tolerance (% of Swing Range)", minval = 0.1, step = 0.1, group = groupPrice)
+
+// Time model
+groupTime = "3. Time Cycle"
+fullWindowDeg = input.float(30.0, "Active Time Window distance to 0/360 (deg)", minval = 1.0, maxval = 90.0, group = groupTime)
+approachDeg   = input.float(60.0, "Approaching Window distance to 0/360 (deg)", minval = 1.0, maxval = 120.0, group = groupTime)
+showCycleBg   = input.bool(true, "Highlight active Time Window", group = groupTime)
+showCycleLine = input.bool(true, "Mark completed cycle boundaries", group = groupTime)
+
+// Clear normalized Time-Cycle wave in a separate pane.
+// The wave uses -1 to +1, so 90 deg = +1 and 270 deg = -1.
+groupSin = "4. Clear Time-Cycle Wave"
+showCycleWave       = input.bool(true, "Show normalized SIN cycle wave (-1 to +1)", group = groupSin)
+sinWaveColor        = input.color(color.rgb(41, 98, 255), "Wave line color", group = groupSin)
+sinWaveWidth        = input.int(3, "Wave line width", minval = 1, maxval = 4, group = groupSin)
+showWaveFill        = input.bool(true, "Fill positive / negative half-cycles", group = groupSin)
+showWaveGuides      = input.bool(true, "Show +1 / 0.866 / 0.5 / 0 / -0.5 / -0.866 / -1 guides", group = groupSin)
+showWaveKeyPoints   = input.bool(true, "Show points at 30-degree steps", group = groupSin)
+showWaveAngleLabels = input.bool(true, "Show recent 30-degree angle labels", group = groupSin)
+showCurrentPhase    = input.bool(true, "Show current phase line and label", group = groupSin)
+showWaveLegend      = input.bool(true, "Show simple wave meaning panel", group = groupSin)
+smoothSinCurve     = input.bool(true, "Smooth SIN wave with curved polyline", group = groupSin, tooltip = "Draws a visual curved polyline. Exact bar values remain available in Data Window and Status Line.")
+showExactWaveLine  = input.bool(false, "Show exact bar-to-bar SIN line under smooth curve", group = groupSin)
+
+// Price Geometry Map
+groupGeom = "5. Price Geometry Map"
+showGeometryMap   = input.bool(true, "Show Price Geometry Map", group = groupGeom)
+showCosGeometry   = input.bool(true, "Show COS geometry wave", group = groupGeom)
+geometryColor     = input.color(color.orange, "COS geometry color", group = groupGeom)
+geometryWidth     = input.int(2, "COS geometry width", minval = 1, maxval = 4, group = groupGeom)
+showGeomStatusBg  = input.bool(false, "Highlight when market price is near COS geometry", group = groupGeom)
+smoothCosCurve     = input.bool(true, "Smooth COS geometry with curved polyline", group = groupGeom, tooltip = "Visual smoothing only. The exact COS value at each historical bar remains unchanged and inspectable.")
+showExactCosLine   = input.bool(false, "Show exact bar-to-bar COS line under smooth curve", group = groupGeom)
+smoothHistoryBars = input.int(600, "Smooth curve history (bars)", minval = 60, maxval = 2000, group = groupGeom)
+smoothMaxSegments = input.int(35, "Maximum historical curve segments", minval = 5, maxval = 45, group = groupGeom, tooltip = "Curves are split when the confirmed swing/anchor changes, preventing false interpolation across a swing reset.")
+
+// Core confirmation: one trigger only
+// WHERE = COS zone, WHEN = full Time Window, TRIGGER = confirmed close BOS.
+groupConfirm = "6. Core Confirmation"
+bosLen          = input.int(5, "Minor structure lookback (BOS)", minval = 2, group = groupConfirm)
+requireBarClose = input.bool(true, "Require bar close for BOS / READY", group = groupConfirm, tooltip = "When enabled, READY can appear only after the current realtime bar closes.")
+armExpiryBars   = input.int(10, "Max bars to wait for BOS after ARMED", minval = 1, maxval = 100, group = groupConfirm)
+
+// Risk gate
+groupRisk = "7. Risk Gate"
+slBuffer = input.float(2.0, "Stop buffer beyond swing (price units)", minval = 0.0, step = 0.1, group = groupRisk)
+minRR    = input.float(1.5, "Minimum RR to swing target", minval = 0.1, step = 0.1, group = groupRisk)
+
+// Optional research only. These values do NOT unlock BUY/SELL.
+groupResearch = "8. Optional Research (not entry gates)"
+rsiLen    = input.int(14, "RSI length", minval = 2, group = groupResearch)
+gannScale = input.float(1.0, "Gann 1x1 scale (price / bar)", minval = 0.000001, step = 0.1, group = groupResearch)
+sq9Step   = input.float(2.0, "Sq9 sqrt step / 360 deg", minval = 0.000001, step = 0.1, group = groupResearch)
+
+// Display
+groupDisplay = "9. Display"
+showDashboard = input.bool(true, "Show simplified core-gate dashboard", group = groupDisplay)
+showSignals   = input.bool(true, "Show ARMED / READY labels", group = groupDisplay)
+
+// Data Inspection
+groupInspect = "10. Data Inspection / Crosshair"
+showInspector = input.bool(true, "Expose bar-by-bar values in TradingView Data Window", group = groupInspect, tooltip = "Move the TradingView crosshair to any bar and open Data Window. Inspector values below are calculated for that historical bar.")
+
+//------------------------------------------------------------------------------
+// Helpers
+//------------------------------------------------------------------------------
+f_median3(array<int> a) =>
+    float out = na
+    if array.size(a) >= 3
+        float x = float(array.get(a, 0))
+        float y = float(array.get(a, 1))
+        float z = float(array.get(a, 2))
+        out := x + y + z - math.max(x, math.max(y, z)) - math.min(x, math.min(y, z))
+    out
+
+f_push3(array<int> a, int v) =>
+    array.push(a, v)
+    if array.size(a) > 3
+        array.shift(a)
+
+f_cosPrice(bool bull, float H, float L, float angleDeg) =>
+    float r = H - L
+    float c = math.cos(math.toradians(angleDeg))
+    bull ? H - r * c : L + r * c
+
+f_sqLevel(float anchor, float step, float angleDeg, bool up) =>
+    float base = math.sqrt(math.max(anchor, 0.0))
+    float inc  = step * angleDeg / 360.0
+    float root = up ? base + inc : base - inc
+    root > 0 ? root * root : na
+
+f_fmt(float x) => str.tostring(x, format.mintick)
+f_fmt1(float x) => str.tostring(x, "#.0")
+f_fmt2(float x) => str.tostring(x, "#.00")
+
+f_crossCycleAngle(float currentTotal, float previousTotal, float targetDeg) =>
+    bool crossed = false
+    if not na(currentTotal) and not na(previousTotal)
+        crossed := math.floor((currentTotal - targetDeg) / 360.0) > math.floor((previousTotal - targetDeg) / 360.0)
+    crossed
+
+f_waveStage(float phaseDeg) =>
+    string stage = "Mean / cycle boundary"
+    if phaseDeg >= 30.0 and phaseDeg < 90.0
+        stage := "Rising positive half"
+    else if phaseDeg >= 90.0 and phaseDeg < 150.0
+        stage := "Falling from +1 crest"
+    else if phaseDeg >= 150.0 and phaseDeg < 210.0
+        stage := "Mean crossing zone"
+    else if phaseDeg >= 210.0 and phaseDeg < 270.0
+        stage := "Falling negative half"
+    else if phaseDeg >= 270.0 and phaseDeg < 330.0
+        stage := "Rising from -1 trough"
+    stage
+
+f_clearPolylines(array<polyline> ids) =>
+    while array.size(ids) > 0
+        polyline.delete(array.pop(ids))
+
+f_storeCurvedPolyline(array<chart.point> points, array<polyline> ids, color lineColor, int lineWidth, bool overlayDrawing, int maxSegments) =>
+    if array.size(points) >= 2
+        polyline curve = polyline.new(
+             points = points,
+             curved = true,
+             closed = false,
+             xloc = xloc.bar_index,
+             line_color = lineColor,
+             fill_color = na,
+             line_style = line.style_solid,
+             line_width = lineWidth,
+             force_overlay = overlayDrawing
+         )
+        array.push(ids, curve)
+        if array.size(ids) > maxSegments
+            polyline.delete(array.shift(ids))
+
+//------------------------------------------------------------------------------
+// Confirmed pivots + cycle statistics
+//------------------------------------------------------------------------------
+float ph = ta.pivothigh(pivotLen, pivotLen)
+float pl = ta.pivotlow(pivotLen, pivotLen)
+
+var float lastPH = na
+var float lastPL = na
+var int   lastPHIdx = na
+var int   lastPLIdx = na
+var int   prevPHIdx = na
+var int   prevPLIdx = na
+var array<int> highIntervals = array.new<int>()
+var array<int> lowIntervals  = array.new<int>()
+
+if not na(ph)
+    int idx = bar_index - pivotLen
+    if not na(prevPHIdx) and idx > prevPHIdx
+        f_push3(highIntervals, idx - prevPHIdx)
+    prevPHIdx := idx
+    lastPHIdx := idx
+    lastPH := ph
+
+if not na(pl)
+    int idx = bar_index - pivotLen
+    if not na(prevPLIdx) and idx > prevPLIdx
+        f_push3(lowIntervals, idx - prevPLIdx)
+    prevPLIdx := idx
+    lastPLIdx := idx
+    lastPL := pl
+
+bool haveSwing = not na(lastPH) and not na(lastPL) and not na(lastPHIdx) and not na(lastPLIdx)
+bool bull = haveSwing ? lastPHIdx > lastPLIdx : true
+float swingH = haveSwing ? lastPH : na
+float swingL = haveSwing ? lastPL : na
+int anchorIdx = haveSwing ? (bull ? lastPLIdx : lastPHIdx) : na
+float anchorPrice = haveSwing ? (bull ? swingL : swingH) : na
+float swingRange = haveSwing ? swingH - swingL : na
+
+float lowCycle  = f_median3(lowIntervals)
+float highCycle = f_median3(highIntervals)
+float autoCycle = bull ? lowCycle : highCycle
+float cycleLen  = math.max(2.0, useAutoCycle and not na(autoCycle) ? autoCycle : manualCycle)
+bool cycleIsAuto = useAutoCycle and not na(autoCycle)
+
+float barsSince = haveSwing ? math.max(0.0, float(bar_index - anchorIdx)) : na
+float totalAngle = haveSwing ? 360.0 * barsSince / cycleLen : na
+float timePhase = haveSwing ? totalAngle % 360.0 : na
+float timeDiff = haveSwing ? math.min(timePhase, 360.0 - timePhase) : na
+int completedCycles = haveSwing ? int(math.floor(barsSince / cycleLen)) : 0
+int cycleNo = completedCycles + 1
+float barsInCycle = haveSwing ? barsSince - completedCycles * cycleLen : na
+float cycleProgress = haveSwing ? 100.0 * barsInCycle / cycleLen : na
+float barsToFull = haveSwing ? (barsInCycle <= 0.000001 ? cycleLen : cycleLen - barsInCycle) : na
+
+//------------------------------------------------------------------------------
+// SIN phase model
+// NOTE: This is the same phase-price visualization used in the web dashboard:
+//       SIN(theta) = Mean + Amplitude * sin(Time Phase).
+//       It is a phase model, not a standalone entry signal and not the COS retracement map.
+//------------------------------------------------------------------------------
+float meanPrice = haveSwing ? (swingH + swingL) / 2.0 : na
+float amplitude = haveSwing ? swingRange / 2.0 : na
+float sinWave = haveSwing ? meanPrice + amplitude * math.sin(math.toradians(timePhase)) : na
+
+// Normalized visual wave for the dedicated pane. This does not use the price scale.
+float sinCycleNorm = haveSwing ? math.sin(math.toradians(timePhase)) : na
+float cosCycleNorm = haveSwing ? math.cos(math.toradians(timePhase)) : na
+float degPerBar = haveSwing ? 360.0 / cycleLen : na
+float nearest30Raw = haveSwing ? math.round(timePhase / 30.0) * 30.0 : na
+float nearest30Wrapped = haveSwing ? (nearest30Raw >= 360.0 ? 0.0 : nearest30Raw) : na
+float nearest30DiffRaw = haveSwing ? math.abs(timePhase - nearest30Wrapped) : na
+float nearest30Diff = haveSwing ? math.min(nearest30DiffRaw, 360.0 - nearest30DiffRaw) : na
+float keyPointTolerance = haveSwing ? math.min(15.0, math.max(1.0, degPerBar / 2.0)) : na
+bool waveKeyPoint = haveSwing and nearest30Diff <= keyPointTolerance
+float waveKeyPointY = waveKeyPoint ? math.sin(math.toradians(nearest30Raw)) : na
+
+//------------------------------------------------------------------------------
+// Price Geometry Map
+// TradingView uses bar/time on the X axis, so the dashboard's 0-360 degree map is
+// translated into a time-indexed overlay. Each bar evaluates the COS price map
+// at the current Time Phase. This is a model/reference curve, not a forecast.
+//------------------------------------------------------------------------------
+float cosGeometryWave = haveSwing ? f_cosPrice(bull, swingH, swingL, timePhase) : na
+float geometryDelta = haveSwing ? close - cosGeometryWave : na
+float geometryDistancePct = haveSwing and swingRange > 0 ? 100.0 * math.abs(geometryDelta) / swingRange : na
+bool geometryNear = haveSwing and geometryDistancePct <= tolerancePct
+
+//------------------------------------------------------------------------------
+// COS map
+//------------------------------------------------------------------------------
+float cos30 = haveSwing ? f_cosPrice(bull, swingH, swingL, 30.0) : na
+float cos45 = haveSwing ? f_cosPrice(bull, swingH, swingL, 45.0) : na
+float cos60 = haveSwing ? f_cosPrice(bull, swingH, swingL, 60.0) : na
+float zoneLow  = haveSwing ? math.min(cos30, cos60) : na
+float zoneHigh = haveSwing ? math.max(cos30, cos60) : na
+float tol = haveSwing ? math.max(syminfo.mintick, swingRange * tolerancePct / 100.0) : na
+bool inZone = haveSwing and close >= zoneLow and close <= zoneHigh
+float zoneDist = haveSwing ? (close < zoneLow ? zoneLow - close : close > zoneHigh ? close - zoneHigh : 0.0) : na
+bool nearZone = haveSwing and (inZone or zoneDist <= tol)
+
+//------------------------------------------------------------------------------
+// Square of 9 proximity
+//------------------------------------------------------------------------------
+var array<float> sqAngles = array.from(45.0, 90.0, 120.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0)
+float sqNearDist = 1e20
+float sqNearPrice = na
+float sqNearAngle = na
+if haveSwing
+    for i = 0 to array.size(sqAngles) - 1
+        float a = array.get(sqAngles, i)
+        float up = f_sqLevel(anchorPrice, sq9Step, a, true)
+        float dn = f_sqLevel(anchorPrice, sq9Step, a, false)
+        if not na(up) and math.abs(close - up) < sqNearDist
+            sqNearDist := math.abs(close - up)
+            sqNearPrice := up
+            sqNearAngle := a
+        if not na(dn) and math.abs(close - dn) < sqNearDist
+            sqNearDist := math.abs(close - dn)
+            sqNearPrice := dn
+            sqNearAngle := -a
+int sqPts = haveSwing and sqNearDist <= tol ? 1 : 0
+
+//------------------------------------------------------------------------------
+// Gann fan proximity
+//------------------------------------------------------------------------------
+var array<float> gannRatios = array.from(0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)
+float sign = bull ? 1.0 : -1.0
+float gannNearDist = 1e20
+float gannNearPrice = na
+float gannNearRatio = na
+if haveSwing
+    for i = 0 to array.size(gannRatios) - 1
+        float ratio = array.get(gannRatios, i)
+        float gp = anchorPrice + sign * gannScale * ratio * barsSince
+        float gd = math.abs(close - gp)
+        if gd < gannNearDist
+            gannNearDist := gd
+            gannNearPrice := gp
+            gannNearRatio := ratio
+int gannPts = haveSwing and gannNearDist <= tol ? 1 : 0
+
+//------------------------------------------------------------------------------
+// Core entry engine: WHERE + WHEN + TRIGGER + RISK
+//------------------------------------------------------------------------------
+float priorHigh = ta.highest(high, bosLen)[1]
+float priorLow  = ta.lowest(low, bosLen)[1]
+bool bosBullRaw = haveSwing and not na(priorHigh) and close > priorHigh
+bool bosBearRaw = haveSwing and not na(priorLow) and close < priorLow
+bool bosRaw = bull ? bosBullRaw : bosBearRaw
+bool bosConfirmed = bosRaw and (not requireBarClose or barstate.isconfirmed)
+
+// Optional research values. They are displayed but are not mandatory gates.
+bool rejectionBull = haveSwing and low <= zoneHigh and close > open and close >= cos45
+bool rejectionBear = haveSwing and high >= zoneLow and close < open and close <= cos45
+bool rejection = bull ? rejectionBull : rejectionBear
+float rsi = ta.rsi(close, rsiLen)
+bool momentum = bull ? rsi > 50.0 : rsi < 50.0
+
+// Mandatory WHERE and WHEN gates.
+bool priceGateNow = nearZone
+bool timeWindow = haveSwing and timeDiff <= fullWindowDeg
+bool approachingWindow = haveSwing and not timeWindow and timeDiff <= approachDeg
+
+// Mandatory risk gate. READY uses RR from the actual trigger bar close to the original swing target.
+float preferredEntry = cos45
+float stopPrice = haveSwing ? (bull ? swingL - slBuffer : swingH + slBuffer) : na
+float swingTarget = haveSwing ? (bull ? swingH : swingL) : na
+float currentRisk = haveSwing ? math.abs(close - stopPrice) : na
+float currentReward = haveSwing ? (bull ? swingTarget - close : close - swingTarget) : na
+float currentRR = haveSwing and currentRisk > 0.0 and currentReward > 0.0 ? currentReward / currentRisk : 0.0
+bool riskGate = haveSwing and currentReward > 0.0 and currentRR >= minRR
+
+float plannedRisk = haveSwing ? math.abs(preferredEntry - stopPrice) : na
+float plannedReward = haveSwing ? (bull ? swingTarget - preferredEntry : preferredEntry - swingTarget) : na
+float plannedRR = haveSwing and plannedRisk > 0.0 and plannedReward > 0.0 ? plannedReward / plannedRisk : na
+
+// Invalidation is based on a close beyond the anchor swing extreme.
+bool invalidated = haveSwing and (bull ? close < swingL : close > swingH)
+int biasCode = bull ? 1 : -1
+
+// ARMED memory: Price + Time may occur before BOS. Once armed, the setup can wait
+// for a confirmed structure break for a limited number of bars.
+var bool setupArmed = false
+var int armedBias = 0
+var int armedAtBar = na
+var int trackedAnchorIdx = na
+var int trackedBias = 0
+
+// Drawing state for the clear cycle-wave pane.
+var array<label> waveAngleLabelIds = array.new<label>()
+var label currentPhaseLabel = na
+var line currentPhaseLine = na
+var array<float> waveLabelAngles = array.from(30.0, 60.0, 90.0, 120.0, 150.0, 180.0, 210.0, 240.0, 270.0, 300.0, 330.0, 360.0)
+var array<polyline> smoothSinPolylineIds = array.new<polyline>()
+var array<polyline> smoothCosPolylineIds = array.new<polyline>()
+
+bool anchorChanged = haveSwing and (na(trackedAnchorIdx) or anchorIdx != trackedAnchorIdx or biasCode != trackedBias)
+if anchorChanged
+    setupArmed := false
+    armedBias := 0
+    armedAtBar := na
+    trackedAnchorIdx := anchorIdx
+    trackedBias := biasCode
+    while array.size(waveAngleLabelIds) > 0
+        label.delete(array.pop(waveAngleLabelIds))
+    if showCycleWave and showWaveAngleLabels and not na(anchorIdx)
+        label anchorLabel = label.new(anchorIdx, 0.0, "0°", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(color.gray, 0), size = size.tiny)
+        array.push(waveAngleLabelIds, anchorLabel)
+
+bool armExpired = setupArmed and not na(armedAtBar) and bar_index - armedAtBar > armExpiryBars
+if invalidated or armExpired
+    setupArmed := false
+    armedBias := 0
+    armedAtBar := na
+
+bool armCondition = haveSwing and not invalidated and priceGateNow and timeWindow
+bool armPulse = false
+if armCondition and not setupArmed
+    setupArmed := true
+    armedBias := biasCode
+    armedAtBar := bar_index
+    armPulse := true
+
+bool armedForEvaluation = setupArmed and armedBias == biasCode
+bool readyPulse = armedForEvaluation and bosConfirmed and riskGate and not invalidated
+bool poorRRBlocked = armedForEvaluation and bosConfirmed and not riskGate and not invalidated
+
+// The two setup gates remain locked after ARMED, so BOS can occur after price leaves the zone.
+bool whereGate = armedForEvaluation or priceGateNow
+bool whenGate = armedForEvaluation or timeWindow
+int coreGatePass = (whereGate ? 1 : 0) + (whenGate ? 1 : 0) + (bosConfirmed ? 1 : 0) + (riskGate ? 1 : 0)
+float armedAge = armedForEvaluation and not na(armedAtBar) ? float(bar_index - armedAtBar) : na
+float armedBarsLeft = armedForEvaluation and not na(armedAtBar) ? math.max(0.0, float(armExpiryBars - (bar_index - armedAtBar))) : na
+
+int statusCode = 0
+string entryStatus = "NO TRADE"
+string entryReason = "Waiting for Price + Time alignment"
+if not haveSwing
+    statusCode := 0
+    entryStatus := "WAITING PIVOTS"
+    entryReason := "Need confirmed Swing High and Swing Low"
+else if invalidated
+    statusCode := 0
+    entryStatus := "INVALID"
+    entryReason := bull ? "Close broke below Swing Low" : "Close broke above Swing High"
+else if readyPulse
+    statusCode := bull ? 3 : -3
+    entryStatus := bull ? "BUY READY" : "SELL READY"
+    entryReason := "WHERE + WHEN + BOS + RR all passed"
+else if poorRRBlocked
+    statusCode := 0
+    entryStatus := "NO TRADE - POOR RR"
+    entryReason := "BOS confirmed, but RR to swing target is below minimum"
+else if armedForEvaluation
+    statusCode := bull ? 2 : -2
+    entryStatus := bull ? "ARMED BUY" : "ARMED SELL"
+    entryReason := "Price + Time locked; waiting for confirmed-close BOS"
+else if priceGateNow and approachingWindow
+    statusCode := bull ? 1 : -1
+    entryStatus := bull ? "WAIT TIME BUY" : "WAIT TIME SELL"
+    entryReason := "Price is ready; Time Window is approaching"
+else if priceGateNow and not timeWindow
+    statusCode := bull ? 1 : -1
+    entryStatus := bull ? "WAIT TIME BUY" : "WAIT TIME SELL"
+    entryReason := "Price is in/near COS zone; Time Window is not active"
+else if timeWindow and not priceGateNow
+    statusCode := bull ? 1 : -1
+    entryStatus := bull ? "WAIT PRICE BUY" : "WAIT PRICE SELL"
+    entryReason := "Time Window is active; price has not reached COS zone"
+else
+    statusCode := 0
+    entryStatus := "NO TRADE"
+    entryReason := approachingWindow ? "Time is approaching, but price is outside the COS zone" : "Price and Time are not aligned"
+
+// A READY signal or a poor-RR block completes this armed attempt.
+if readyPulse or poorRRBlocked
+    setupArmed := false
+    armedBias := 0
+    armedAtBar := na
+
+//------------------------------------------------------------------------------
+// Cycle-wave labels and current phase marker
+//------------------------------------------------------------------------------
+if barstate.isnew and showCycleWave and showWaveAngleLabels and haveSwing and not na(totalAngle[1])
+    for i = 0 to array.size(waveLabelAngles) - 1
+        float angleValue = array.get(waveLabelAngles, i)
+        if f_crossCycleAngle(totalAngle, totalAngle[1], angleValue)
+            float labelY = math.sin(math.toradians(angleValue))
+            string angleText = angleValue == 360.0 ? "360° / 0°" : str.tostring(int(angleValue)) + "°"
+            label angleLabel = label.new(bar_index, labelY, angleText, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(color.gray, 5), size = size.tiny)
+            array.push(waveAngleLabelIds, angleLabel)
+            if array.size(waveAngleLabelIds) > 37
+                label.delete(array.shift(waveAngleLabelIds))
+
+if barstate.islast
+    if not showWaveAngleLabels
+        while array.size(waveAngleLabelIds) > 0
+            label.delete(array.pop(waveAngleLabelIds))
+    if not na(currentPhaseLabel)
+        label.delete(currentPhaseLabel)
+        currentPhaseLabel := na
+    if not na(currentPhaseLine)
+        line.delete(currentPhaseLine)
+        currentPhaseLine := na
+    if showCycleWave and showCurrentPhase and haveSwing
+        currentPhaseLine := line.new(bar_index, -1.08, bar_index, 1.08, xloc = xloc.bar_index, extend = extend.none, color = color.new(color.red, 15), style = line.style_dashed, width = 1)
+        string phaseText = "NOW  " + f_fmt1(timePhase) + "°\nSIN  " + f_fmt2(sinCycleNorm) + "\n" + f_waveStage(timePhase)
+        currentPhaseLabel := label.new(bar_index, sinCycleNorm, phaseText, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_left, color = color.new(color.red, 15), textcolor = color.white, size = size.small)
+
+//------------------------------------------------------------------------------
+// Smooth visual curves
+//------------------------------------------------------------------------------
+// Pine plots provide the exact series values used by Crosshair/Data Window.
+// Curved polylines are added only for visual interpolation and are split whenever
+// the confirmed swing anchor or bias changes, so a curve cannot bend across a reset.
+if barstate.islast
+    f_clearPolylines(smoothSinPolylineIds)
+    f_clearPolylines(smoothCosPolylineIds)
+    if haveSwing and ((showCycleWave and smoothSinCurve) or (showGeometryMap and showCosGeometry and smoothCosCurve))
+        int historyBars = math.min(smoothHistoryBars - 1, bar_index)
+        array<chart.point> sinPoints = array.new<chart.point>()
+        array<chart.point> cosPoints = array.new<chart.point>()
+        int segmentAnchor = na
+        int segmentBias = 0
+        for scan = 0 to historyBars
+            int historyOffset = historyBars - scan
+            bool validPoint = not na(anchorIdx[historyOffset]) and not na(sinCycleNorm[historyOffset]) and not na(cosGeometryWave[historyOffset])
+            int pointAnchor = validPoint ? anchorIdx[historyOffset] : na
+            int pointBias = validPoint ? (bull[historyOffset] ? 1 : -1) : 0
+            bool segmentBreak = validPoint and not na(segmentAnchor) and (pointAnchor != segmentAnchor or pointBias != segmentBias)
+            if not validPoint or segmentBreak
+                if showCycleWave and smoothSinCurve
+                    f_storeCurvedPolyline(sinPoints, smoothSinPolylineIds, sinWaveColor, sinWaveWidth, false, smoothMaxSegments)
+                if showGeometryMap and showCosGeometry and smoothCosCurve
+                    f_storeCurvedPolyline(cosPoints, smoothCosPolylineIds, geometryColor, geometryWidth, true, smoothMaxSegments)
+                sinPoints := array.new<chart.point>()
+                cosPoints := array.new<chart.point>()
+                segmentAnchor := na
+                segmentBias := 0
+            if validPoint
+                int pointIndex = bar_index - historyOffset
+                if showCycleWave and smoothSinCurve
+                    array.push(sinPoints, chart.point.from_index(pointIndex, sinCycleNorm[historyOffset]))
+                if showGeometryMap and showCosGeometry and smoothCosCurve
+                    array.push(cosPoints, chart.point.from_index(pointIndex, cosGeometryWave[historyOffset]))
+                segmentAnchor := pointAnchor
+                segmentBias := pointBias
+        if showCycleWave and smoothSinCurve
+            f_storeCurvedPolyline(sinPoints, smoothSinPolylineIds, sinWaveColor, sinWaveWidth, false, smoothMaxSegments)
+        if showGeometryMap and showCosGeometry and smoothCosCurve
+            f_storeCurvedPolyline(cosPoints, smoothCosPolylineIds, geometryColor, geometryWidth, true, smoothMaxSegments)
+
+//------------------------------------------------------------------------------
+// Plots
+//------------------------------------------------------------------------------
+color biasColor = bull ? color.lime : color.red
+
+// Dedicated normalized cycle-wave pane, designed to read like a textbook SIN graph.
+hline(1.0, "SIN +1 | 90 deg", color = color.new(color.gray, 42), linestyle = hline.style_solid, display = showWaveGuides ? display.all : display.none)
+hline(0.8660254, "SIN +0.866 | 60/120 deg", color = color.new(color.gray, 68), linestyle = hline.style_dotted, display = showWaveGuides ? display.all : display.none)
+hline(0.5, "SIN +0.5 | 30/150 deg", color = color.new(color.gray, 68), linestyle = hline.style_dashed, display = showWaveGuides ? display.all : display.none)
+hline(0.0, "SIN 0 | 0/180/360 deg", color = color.new(color.gray, 20), linestyle = hline.style_solid, display = showWaveGuides ? display.all : display.none)
+hline(-0.5, "SIN -0.5 | 210/330 deg", color = color.new(color.gray, 68), linestyle = hline.style_dashed, display = showWaveGuides ? display.all : display.none)
+hline(-0.8660254, "SIN -0.866 | 240/300 deg", color = color.new(color.gray, 68), linestyle = hline.style_dotted, display = showWaveGuides ? display.all : display.none)
+hline(-1.0, "SIN -1 | 270 deg", color = color.new(color.gray, 42), linestyle = hline.style_solid, display = showWaveGuides ? display.all : display.none)
+
+waveZeroPlot = plot(showCycleWave ? 0.0 : na, "Cycle Wave Zero", color = color.new(color.gray, 45), linewidth = 1)
+color exactWaveColor = smoothSinCurve ? (showExactWaveLine ? color.new(sinWaveColor, 68) : color.new(sinWaveColor, 100)) : sinWaveColor
+wavePlot = plot(showCycleWave ? sinCycleNorm : na, "SIN Time-Cycle exact series", color = exactWaveColor, linewidth = smoothSinCurve ? 1 : sinWaveWidth, style = plot.style_line)
+fill(wavePlot, waveZeroPlot, color = showCycleWave and showWaveFill ? (sinCycleNorm >= 0.0 ? color.new(sinWaveColor, 84) : color.new(color.purple, 88)) : na, title = "Positive / Negative Cycle Fill")
+plot(showCycleWave and showWaveKeyPoints ? waveKeyPointY : na, "30-degree Cycle Points", color = color.new(color.black, 0), linewidth = 4, style = plot.style_circles)
+
+// Main-chart price overlays. Pine v6 force_overlay keeps these on the symbol chart
+// while the normalized wave remains in its own pane.
+plotHigh = plot(showLevels ? swingH : na, "Swing High", color = color.new(color.red, 15), linewidth = 1, style = plot.style_linebr, force_overlay = true)
+plotLow  = plot(showLevels ? swingL : na, "Swing Low", color = color.new(color.lime, 15), linewidth = 1, style = plot.style_linebr, force_overlay = true)
+plot30   = plot(showLevels ? cos30 : na, "COS30", color = color.new(color.orange, 35), linewidth = 1, style = plot.style_linebr, force_overlay = true)
+plot45   = plot(showLevels ? cos45 : na, "COS45 Preferred", color = color.orange, linewidth = 2, style = plot.style_linebr, force_overlay = true)
+plot60   = plot(showLevels ? cos60 : na, "COS60 / Mean", color = color.new(color.blue, 10), linewidth = 1, style = plot.style_linebr, force_overlay = true)
+fill(plot30, plot60, color = showZone ? color.new(biasColor, 90) : na, title = "COS Candidate Zone")
+
+color exactCosColor = smoothCosCurve ? (showExactCosLine ? color.new(geometryColor, 68) : color.new(geometryColor, 100)) : geometryColor
+plotGeom = plot(showGeometryMap and showCosGeometry ? cosGeometryWave : na, "COS Geometry exact series", color = exactCosColor, linewidth = smoothCosCurve ? 1 : geometryWidth, style = plot.style_linebr, force_overlay = true)
+
+bgcolor(showCycleBg and timeWindow ? color.new(color.blue, 93) : showGeometryMap and showGeomStatusBg and geometryNear ? color.new(geometryColor, 94) : na, title = "Time / Geometry Window", force_overlay = true)
+
+bool newCycle = haveSwing and completedCycles > nz(completedCycles[1], completedCycles)
+if showCycleLine and newCycle
+    line.new(bar_index, low, bar_index, high, extend = extend.both, color = color.new(color.blue, 60), style = line.style_dashed, width = 1, force_overlay = true)
+    line.new(bar_index, -1.05, bar_index, 1.05, extend = extend.none, color = color.new(color.blue, 68), style = line.style_dashed, width = 1)
+
+plotshape(showSignals and armPulse and bull, title = "ARMED BUY", text = "ARMED BUY", style = shape.labelup, location = location.belowbar, color = color.new(color.orange, 0), textcolor = color.black, size = size.tiny, force_overlay = true)
+plotshape(showSignals and armPulse and not bull, title = "ARMED SELL", text = "ARMED SELL", style = shape.labeldown, location = location.abovebar, color = color.new(color.orange, 0), textcolor = color.black, size = size.tiny, force_overlay = true)
+plotshape(showSignals and readyPulse and bull, title = "BUY Ready", text = "BUY", style = shape.labelup, location = location.belowbar, color = color.lime, textcolor = color.black, size = size.small, force_overlay = true)
+plotshape(showSignals and readyPulse and not bull, title = "SELL Ready", text = "SELL", style = shape.labeldown, location = location.abovebar, color = color.red, textcolor = color.white, size = size.small, force_overlay = true)
+plotshape(showSignals and poorRRBlocked, title = "Poor RR Block", text = "NO RR", style = shape.labeldown, location = location.abovebar, color = color.new(color.gray, 10), textcolor = color.white, size = size.tiny, force_overlay = true)
+
+plotshape(not na(ph), title = "Confirmed Pivot High", style = shape.triangledown, location = location.abovebar, offset = -pivotLen, color = color.new(color.red, 20), size = size.tiny, force_overlay = true)
+plotshape(not na(pl), title = "Confirmed Pivot Low", style = shape.triangleup, location = location.belowbar, offset = -pivotLen, color = color.new(color.lime, 20), size = size.tiny, force_overlay = true)
+
+//------------------------------------------------------------------------------
+// Data Inspection / Crosshair
+// Entry status code: +3 BUY READY, +2 ARMED BUY, +1 WAIT BUY,
+//                    0 NO TRADE/INVALID, -1 WAIT SELL, -2 ARMED SELL, -3 SELL READY.
+//------------------------------------------------------------------------------
+float inspectBiasCode = haveSwing ? (bull ? 1.0 : -1.0) : na
+float inspectZoneCode = haveSwing ? (inZone ? 2.0 : nearZone ? 1.0 : 0.0) : na
+float inspectStatusCode = haveSwing ? float(statusCode) : na
+float inspectPriceGate = haveSwing ? (whereGate ? 1.0 : 0.0) : na
+float inspectTimeGate = haveSwing ? (whenGate ? 1.0 : 0.0) : na
+float inspectArmed = haveSwing ? (armedForEvaluation ? 1.0 : 0.0) : na
+float inspectBos = haveSwing ? (bosConfirmed ? 1.0 : 0.0) : na
+float inspectRiskGate = haveSwing ? (riskGate ? 1.0 : 0.0) : na
+float inspectInvalid = haveSwing ? (invalidated ? 1.0 : 0.0) : na
+float inspectReject = haveSwing ? (rejection ? 1.0 : 0.0) : na
+float inspectMomentum = haveSwing ? (momentum ? 1.0 : 0.0) : na
+float inspectSq9 = haveSwing ? (sqPts > 0 ? 1.0 : 0.0) : na
+float inspectGann = haveSwing ? (gannPts > 0 ? 1.0 : 0.0) : na
+
+plot(showInspector ? close : na, "Inspector • Close", display = display.data_window)
+plot(showInspector ? inspectBiasCode : na, "Inspector • Bias code (+1 BUY / -1 SELL)", display = display.data_window)
+plot(showInspector ? swingH : na, "Inspector • Swing High", display = display.data_window)
+plot(showInspector ? swingL : na, "Inspector • Swing Low", display = display.data_window)
+plot(showInspector ? cycleLen : na, "Inspector • Cycle Length (bars)", display = display.data_window)
+plot(showInspector ? float(cycleNo) : na, "Inspector • Cycle #", display = display.data_window)
+plot(showInspector ? barsSince : na, "Inspector • Bars Since Anchor", display = display.data_window)
+plot(showInspector ? cycleProgress : na, "Inspector • Cycle Progress %", display = display.data_window)
+plot(showInspector ? timePhase : na, "Cursor • Time Phase (deg)", display = display.status_line + display.data_window)
+plot(showInspector ? barsToFull : na, "Inspector • Bars to Next 360", display = display.data_window)
+plot(showInspector ? cos30 : na, "Inspector • COS30", display = display.data_window)
+plot(showInspector ? cos45 : na, "Inspector • COS45 Preferred", display = display.data_window)
+plot(showInspector ? cos60 : na, "Inspector • COS60 / Mean", display = display.data_window)
+plot(showInspector ? sinCycleNorm : na, "Cursor • SIN curve (-1 to +1)", display = display.status_line + display.data_window)
+plot(showInspector ? cosCycleNorm : na, "Cursor • COS curve (-1 to +1)", display = display.status_line + display.data_window)
+plot(showInspector ? sinWave : na, "Cursor • SIN phase price", display = display.status_line + display.data_window)
+plot(showInspector ? cosGeometryWave : na, "Cursor • COS geometry price", display = display.status_line + display.data_window, force_overlay = true)
+plot(showInspector ? geometryDelta : na, "Inspector • Price - Geometry", display = display.data_window)
+plot(showInspector ? geometryDistancePct : na, "Inspector • Geometry Distance %R", display = display.data_window)
+plot(showInspector ? inspectZoneCode : na, "Inspector • Price Zone (2 inside / 1 near / 0 out)", display = display.data_window)
+plot(showInspector ? inspectPriceGate : na, "Inspector • Gate 1 WHERE / Price (1/0)", display = display.data_window)
+plot(showInspector ? inspectTimeGate : na, "Inspector • Gate 2 WHEN / Time (1/0)", display = display.data_window)
+plot(showInspector ? inspectArmed : na, "Inspector • ARMED state (1/0)", display = display.data_window)
+plot(showInspector ? inspectBos : na, "Inspector • Gate 3 BOS confirmed (1/0)", display = display.data_window)
+plot(showInspector ? currentRR : na, "Inspector • Current RR to swing target", display = display.data_window)
+plot(showInspector ? plannedRR : na, "Inspector • Planned RR at COS45", display = display.data_window)
+plot(showInspector ? inspectRiskGate : na, "Inspector • Gate 4 Risk / RR (1/0)", display = display.data_window)
+plot(showInspector ? stopPrice : na, "Inspector • Stop Price", display = display.data_window)
+plot(showInspector ? swingTarget : na, "Inspector • Swing Target", display = display.data_window)
+plot(showInspector ? inspectInvalid : na, "Inspector • Invalidated (1/0)", display = display.data_window)
+plot(showInspector ? inspectReject : na, "Inspector • Optional Rejection (1/0)", display = display.data_window)
+plot(showInspector ? rsi : na, "Inspector • Optional RSI", display = display.data_window)
+plot(showInspector ? inspectMomentum : na, "Inspector • Optional Momentum (1/0)", display = display.data_window)
+plot(showInspector ? inspectSq9 : na, "Inspector • Optional Sq9 Near (1/0)", display = display.data_window)
+plot(showInspector ? inspectGann : na, "Inspector • Optional Gann Near (1/0)", display = display.data_window)
+plot(showInspector ? float(coreGatePass) : na, "Inspector • Core Gates Passed /4", display = display.data_window)
+plot(showInspector ? inspectStatusCode : na, "Inspector • Entry Status code (+3 ... -3)", display = display.data_window)
+
+//------------------------------------------------------------------------------
+// Alerts
+//------------------------------------------------------------------------------
+alertcondition(armPulse and bull, "Gann P/T ARMED BUY", "XAUUSD Gann Price-Time: ARMED BUY - Price and Time gates passed; waiting for BOS")
+alertcondition(armPulse and not bull, "Gann P/T ARMED SELL", "XAUUSD Gann Price-Time: ARMED SELL - Price and Time gates passed; waiting for BOS")
+alertcondition(readyPulse and bull, "Gann P/T BUY Ready", "XAUUSD Gann Price-Time: BUY READY - Core gates passed")
+alertcondition(readyPulse and not bull, "Gann P/T SELL Ready", "XAUUSD Gann Price-Time: SELL READY - Core gates passed")
+alertcondition(timeWindow and not timeWindow[1], "Time Window Active", "Gann Price-Time: full Time Window is active")
+alertcondition(geometryNear and not geometryNear[1], "Price Near Geometry", "Gann Price-Time: market price is near the COS Geometry curve")
+
+//------------------------------------------------------------------------------
+// Simple wave meaning panel (stays in the normalized wave pane)
+//------------------------------------------------------------------------------
+var table waveLegend = table.new(position.bottom_left, 2, 7, border_width = 1)
+if barstate.islast and showWaveLegend
+    color legendHeader = color.new(color.blue, 58)
+    color legendBg = color.new(color.gray, 90)
+    table.cell(waveLegend, 0, 0, "SIN TIME-CYCLE", text_color = color.white, bgcolor = legendHeader, text_size = size.tiny)
+    table.cell(waveLegend, 1, 0, haveSwing ? "T = " + f_fmt2(cycleLen) + " bars" : "Waiting pivots", text_color = color.white, bgcolor = legendHeader, text_size = size.tiny)
+    table.cell(waveLegend, 0, 1, "0 / 180 / 360 deg", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 1, 1, "SIN 0 | mean line", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 0, 2, "30 / 150 deg", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 1, 2, "SIN +0.5", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 0, 3, "60 / 120 deg", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 1, 3, "SIN +0.866", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 0, 4, "90 deg", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 1, 4, "SIN +1 | crest", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 0, 5, "270 deg", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 1, 5, "SIN -1 | trough", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 0, 6, "CURSOR / CURRENT", bgcolor = legendBg, text_size = size.tiny)
+    table.cell(waveLegend, 1, 6, haveSwing ? f_fmt1(timePhase) + " deg | SIN " + f_fmt2(sinCycleNorm) : "—", bgcolor = legendBg, text_size = size.tiny)
+else if barstate.islast
+    table.clear(waveLegend, 0, 0, 1, 6)
+
+//------------------------------------------------------------------------------
+// Simplified Core-Gate Dashboard
+//------------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 3, 19, border_width = 1, force_overlay = true)
+if barstate.islast and showDashboard
+    color headerBg = color.new(biasColor, 72)
+    color passBg = color.new(color.green, 78)
+    color waitBg = color.new(color.orange, 80)
+    color failBg = color.new(color.red, 82)
+    color neutralBg = color.new(color.gray, 88)
+    color statusBg = math.abs(statusCode) == 3 ? (bull ? color.new(color.lime, 58) : color.new(color.red, 58)) : math.abs(statusCode) == 2 ? color.new(color.orange, 65) : (entryStatus == "INVALID" or entryStatus == "NO TRADE - POOR RR") ? color.new(color.red, 75) : color.new(color.gray, 82)
+    string timeStatus = timeWindow ? "TIME WINDOW" : approachingWindow ? "APPROACHING" : "MID CYCLE"
+    string cycleMode = cycleIsAuto ? "AUTO median-3" : "MANUAL/FALLBACK"
+    string whereState = armedForEvaluation ? "LOCKED" : inZone ? "PASS" : nearZone ? "PASS NEAR" : "WAIT"
+    string whenState = armedForEvaluation ? "LOCKED" : timeWindow ? "PASS" : approachingWindow ? "APPROACH" : "WAIT"
+    string triggerState = bosConfirmed ? "PASS" : "WAIT"
+    string riskState = riskGate ? "PASS" : "FAIL"
+    color whereBg = whereGate ? passBg : neutralBg
+    color whenBg = whenGate ? passBg : approachingWindow ? waitBg : neutralBg
+    color triggerBg = bosConfirmed ? passBg : neutralBg
+    color riskBg = riskGate ? passBg : failBg
+    string armState = readyPulse ? "TRIGGERED" : poorRRBlocked ? "BLOCKED" : armedForEvaluation ? "ARMED" : "IDLE"
+    string armDetail = armedForEvaluation ? "BOS wait: " + f_fmt1(armedBarsLeft) + " bars left" : "Price + Time must pass together"
+    string optionalText = "Reject " + (rejection ? "YES" : "NO") + " • RSI " + f_fmt1(rsi)
+    string optionalGeom = "Geom " + (geometryNear ? "NEAR" : "FAR") + " • Sq9/Gann " + (sqPts > 0 ? "Y" : "N") + "/" + (gannPts > 0 ? "Y" : "N")
+
+    table.cell(dash, 0, 0, "CORE GATE V7", text_color = color.white, bgcolor = headerBg)
+    table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color = color.white, bgcolor = headerBg)
+    table.cell(dash, 2, 0, cycleMode, text_color = color.white, bgcolor = headerBg)
+
+    table.cell(dash, 0, 1, "BIAS")
+    table.cell(dash, 1, 1, bull ? "BUY" : "SELL", text_color = biasColor)
+    table.cell(dash, 2, 1, bull ? "Low to High" : "High to Low")
+
+    table.cell(dash, 0, 2, "SWING")
+    table.cell(dash, 1, 2, haveSwing ? f_fmt(swingH) + " / " + f_fmt(swingL) : "Waiting")
+    table.cell(dash, 2, 2, haveSwing ? "Range " + f_fmt(swingRange) : "Need pivots")
+
+    table.cell(dash, 0, 3, "CYCLE")
+    table.cell(dash, 1, 3, f_fmt2(cycleLen) + " bars")
+    table.cell(dash, 2, 3, haveSwing ? "#" + str.tostring(cycleNo) + " • " + f_fmt1(cycleProgress) + "%" : "—")
+
+    table.cell(dash, 0, 4, "TIME")
+    table.cell(dash, 1, 4, haveSwing ? f_fmt1(timePhase) + "°" : "—")
+    table.cell(dash, 2, 4, timeStatus)
+
+    table.cell(dash, 0, 5, "CYCLE WAVE")
+    table.cell(dash, 1, 5, haveSwing ? "SIN " + f_fmt2(sinCycleNorm) : "—")
+    table.cell(dash, 2, 5, haveSwing ? "Next 360: " + f_fmt2(barsToFull) + " bars" : "Normalized -1 to +1")
+
+    table.cell(dash, 0, 6, "CORE ENTRY GATES", text_color = color.white, bgcolor = color.new(color.blue, 55))
+    table.cell(dash, 1, 6, str.tostring(coreGatePass) + "/4", text_color = color.white, bgcolor = color.new(color.blue, 55))
+    table.cell(dash, 2, 6, "No weighted score", text_color = color.white, bgcolor = color.new(color.blue, 55))
+
+    table.cell(dash, 0, 7, "1 WHERE • PRICE")
+    table.cell(dash, 1, 7, whereState, bgcolor = whereBg)
+    table.cell(dash, 2, 7, haveSwing ? f_fmt(zoneLow) + " - " + f_fmt(zoneHigh) : "COS30-60 zone")
+
+    table.cell(dash, 0, 8, "2 WHEN • TIME")
+    table.cell(dash, 1, 8, whenState, bgcolor = whenBg)
+    table.cell(dash, 2, 8, haveSwing ? "0/360 Δ " + f_fmt1(timeDiff) + "°" : "Full window required")
+
+    table.cell(dash, 0, 9, "3 TRIGGER • BOS")
+    table.cell(dash, 1, 9, triggerState, bgcolor = triggerBg)
+    table.cell(dash, 2, 9, bull ? "Close > prior high" : "Close < prior low")
+
+    table.cell(dash, 0, 10, "4 RISK • RR")
+    table.cell(dash, 1, 10, riskState, bgcolor = riskBg)
+    table.cell(dash, 2, 10, "RR " + f_fmt2(currentRR) + " ≥ " + f_fmt2(minRR))
+
+    table.cell(dash, 0, 11, "ARM STATUS")
+    table.cell(dash, 1, 11, armState, bgcolor = armedForEvaluation ? waitBg : neutralBg)
+    table.cell(dash, 2, 11, armDetail)
+
+    table.cell(dash, 0, 12, "ENTRY STATUS", text_color = color.white, bgcolor = statusBg)
+    table.cell(dash, 1, 12, entryStatus, text_color = color.white, bgcolor = statusBg)
+    table.cell(dash, 2, 12, entryReason, text_color = color.white, bgcolor = statusBg)
+
+    table.cell(dash, 0, 13, "PREFERRED ENTRY")
+    table.cell(dash, 1, 13, haveSwing ? f_fmt(preferredEntry) : "—")
+    table.cell(dash, 2, 13, "COS45 reference")
+
+    table.cell(dash, 0, 14, "STOP / TARGET")
+    table.cell(dash, 1, 14, haveSwing ? f_fmt(stopPrice) + " / " + f_fmt(swingTarget) : "—")
+    table.cell(dash, 2, 14, haveSwing ? "Plan RR " + f_fmt2(plannedRR) : "—")
+
+    table.cell(dash, 0, 15, "OPTIONAL ONLY", text_color = color.white, bgcolor = color.new(color.purple, 65))
+    table.cell(dash, 1, 15, "NO ENTRY GATE", text_color = color.white, bgcolor = color.new(color.purple, 65))
+    table.cell(dash, 2, 15, "Research context", text_color = color.white, bgcolor = color.new(color.purple, 65))
+
+    table.cell(dash, 0, 16, "Reject / RSI")
+    table.cell(dash, 1, 16, optionalText)
+    table.cell(dash, 2, 16, momentum ? "Momentum aligned" : "Momentum not aligned")
+
+    table.cell(dash, 0, 17, "Geometry / Sq9 / Gann")
+    table.cell(dash, 1, 17, optionalGeom)
+    table.cell(dash, 2, 17, "Informational only")
+
+    table.cell(dash, 0, 18, "CROSSHAIR")
+    table.cell(dash, 1, 18, showInspector ? "DATA WINDOW ON" : "OFF", text_color = showInspector ? color.aqua : color.gray)
+    table.cell(dash, 2, 18, "Move crosshair • open Data Window")
+
+if barstate.islast and not showDashboard
+    table.clear(dash, 0, 0, 2, 18)
