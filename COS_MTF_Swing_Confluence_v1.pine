@@ -1,0 +1,464 @@
+//@version=6
+indicator("COS MTF Swing Confluence v1.0", overlay = true, max_bars_back = 2000, max_lines_count = 200, max_labels_count = 200, max_boxes_count = 500)
+
+// ============================================================================
+// 1) INPUTS
+// ============================================================================
+string G_TREND = "1. Multi-Timeframe Bias"
+string G_SWING = "2. Swing / COS Fibonacci"
+string G_VP    = "3. Swing Volume Profile"
+string G_ZONE  = "4. Supply / Demand / FVG / Order Block"
+string G_ENTRY = "5. Confluence / Entry / RR"
+string G_UI    = "6. Display"
+
+int swingLen = input.int(5, "Swing pivot length", minval = 2, maxval = 50, group = G_SWING)
+int emaLen   = input.int(50, "EMA length for trend filter", minval = 2, maxval = 500, group = G_TREND)
+
+string tf1 = input.timeframe("15", "TF 1", group = G_TREND)
+string tf2 = input.timeframe("60", "TF 2", group = G_TREND)
+string tf3 = input.timeframe("240", "TF 3", group = G_TREND)
+string tf4 = input.timeframe("D", "TF 4", group = G_TREND)
+string tf5 = input.timeframe("W", "TF 5", group = G_TREND)
+
+bool useTf1 = input.bool(true, "Use TF1 in consensus", group = G_TREND)
+bool useTf2 = input.bool(true, "Use TF2 in consensus", group = G_TREND)
+bool useTf3 = input.bool(true, "Use TF3 in consensus", group = G_TREND)
+bool useTf4 = input.bool(false, "Use TF4 in consensus", group = G_TREND)
+bool useTf5 = input.bool(false, "Use TF5 in consensus", group = G_TREND)
+
+float cos30Input = input.float(86.6025, "COS 30 level (%)", minval = 0.0, maxval = 100.0, step = 0.0001, group = G_SWING)
+float cos45Input = input.float(70.7107, "COS 45 level (%)", minval = 0.0, maxval = 100.0, step = 0.0001, group = G_SWING)
+float cos60Input = input.float(50.0000, "COS 60 level (%)", minval = 0.0, maxval = 100.0, step = 0.0001, group = G_SWING)
+bool showFib      = input.bool(true, "Show COS Fibonacci", group = G_SWING)
+bool showSwings   = input.bool(true, "Show swing labels", group = G_SWING)
+
+bool showVP       = input.bool(true, "Show swing volume profile", group = G_VP)
+int vpRows        = input.int(32, "Profile rows", minval = 10, maxval = 80, group = G_VP)
+int vpMaxBars     = input.int(400, "Max bars used in profile", minval = 50, maxval = 1500, group = G_VP)
+int vpWidthBars   = input.int(18, "Profile max width (bars)", minval = 5, maxval = 60, group = G_VP)
+bool showPOC      = input.bool(true, "Show POC", group = G_VP)
+
+bool showSD       = input.bool(true, "Supply / Demand", group = G_ZONE)
+bool showFVG      = input.bool(true, "Fair Value Gap", group = G_ZONE)
+bool showOB       = input.bool(true, "Order Block", group = G_ZONE)
+int zoneLookback  = input.int(120, "Zone lookback", minval = 20, maxval = 500, group = G_ZONE)
+int maxZonesEach  = input.int(4, "Max zones each type", minval = 1, maxval = 10, group = G_ZONE)
+float impulseATR  = input.float(1.2, "Displacement body >= ATR x", minval = 0.2, maxval = 5.0, step = 0.1, group = G_ZONE)
+float minFvgATR   = input.float(0.10, "Minimum FVG size ATR x", minval = 0.0, maxval = 2.0, step = 0.05, group = G_ZONE)
+
+bool usePOCConf   = input.bool(true, "POC confirmation", group = G_ENTRY)
+bool useSDConf    = input.bool(true, "Supply/Demand confirmation", group = G_ENTRY)
+bool useFVGConf   = input.bool(true, "FVG confirmation", group = G_ENTRY)
+bool useOBConf    = input.bool(true, "Order Block confirmation", group = G_ENTRY)
+int minConfirm    = input.int(2, "Minimum confirmations", minval = 1, maxval = 4, group = G_ENTRY)
+float tolATR      = input.float(0.15, "COS/POC tolerance (ATR x)", minval = 0.01, maxval = 2.0, step = 0.01, group = G_ENTRY)
+string entryCos   = input.string("COS30 + COS45", "Allowed entry level", options = ["COS30", "COS45", "COS30 + COS45"], group = G_ENTRY)
+float rrReward    = input.float(0.58, "Reward / Risk", minval = 0.10, maxval = 10.0, step = 0.01, group = G_ENTRY)
+string slMode     = input.string("Swing", "Stop-loss mode", options = ["Swing", "ATR"], group = G_ENTRY)
+float slAtrMult   = input.float(0.5, "SL ATR buffer", minval = 0.0, maxval = 5.0, step = 0.1, group = G_ENTRY)
+bool confirmedOnly = input.bool(true, "Signals only on confirmed bar", group = G_ENTRY)
+
+bool showDashboard = input.bool(true, "Show dashboard", group = G_UI)
+bool showEntry     = input.bool(true, "Show entry / SL / TP", group = G_UI)
+bool showEMA       = input.bool(false, "Show chart EMA", group = G_UI)
+
+// ============================================================================
+// 2) HELPERS
+// ============================================================================
+f_bias(int pLen, int eLen) =>
+    float ph = ta.pivothigh(high, pLen, pLen)
+    float pl = ta.pivotlow(low, pLen, pLen)
+    float h0 = ta.valuewhen(not na(ph), ph, 0)
+    float h1 = ta.valuewhen(not na(ph), ph, 1)
+    float l0 = ta.valuewhen(not na(pl), pl, 0)
+    float l1 = ta.valuewhen(not na(pl), pl, 1)
+    float e  = ta.ema(close, eLen)
+    bool structBull = not na(h0) and not na(h1) and not na(l0) and not na(l1) and h0 > h1 and l0 > l1
+    bool structBear = not na(h0) and not na(h1) and not na(l0) and not na(l1) and h0 < h1 and l0 < l1
+    int b = structBull and close > e ? 1 : structBear and close < e ? -1 : close > e ? 1 : close < e ? -1 : 0
+    b
+
+f_biasText(int b) =>
+    b == 1 ? "BULL" : b == -1 ? "BEAR" : "NEUTRAL"
+
+f_biasColor(int b) =>
+    b == 1 ? color.lime : b == -1 ? color.red : color.silver
+
+f_inZone(float price, float top, float bot) =>
+    not na(top) and not na(bot) and price <= math.max(top, bot) and price >= math.min(top, bot)
+
+f_near(float a, float b, float tolerance) =>
+    not na(a) and not na(b) and math.abs(a - b) <= tolerance
+
+f_clampInt(int v, int lo, int hi) =>
+    int(math.max(lo, math.min(hi, v)))
+
+f_deleteBoxes(array<box> arr) =>
+    int n = array.size(arr)
+    if n > 0
+        for i = n - 1 to 0
+            box.delete(array.get(arr, i))
+            array.remove(arr, i)
+
+f_trimBoxes(array<box> arr, int maxCount) =>
+    while array.size(arr) > maxCount
+        box old = array.shift(arr)
+        box.delete(old)
+
+// ============================================================================
+// 3) MULTI-TIMEFRAME BIAS
+// ============================================================================
+int b1 = request.security(syminfo.tickerid, tf1, f_bias(swingLen, emaLen), lookahead = barmerge.lookahead_off)
+int b2 = request.security(syminfo.tickerid, tf2, f_bias(swingLen, emaLen), lookahead = barmerge.lookahead_off)
+int b3 = request.security(syminfo.tickerid, tf3, f_bias(swingLen, emaLen), lookahead = barmerge.lookahead_off)
+int b4 = request.security(syminfo.tickerid, tf4, f_bias(swingLen, emaLen), lookahead = barmerge.lookahead_off)
+int b5 = request.security(syminfo.tickerid, tf5, f_bias(swingLen, emaLen), lookahead = barmerge.lookahead_off)
+
+int bullVotes = (useTf1 and b1 == 1 ? 1 : 0) + (useTf2 and b2 == 1 ? 1 : 0) + (useTf3 and b3 == 1 ? 1 : 0) + (useTf4 and b4 == 1 ? 1 : 0) + (useTf5 and b5 == 1 ? 1 : 0)
+int bearVotes = (useTf1 and b1 == -1 ? 1 : 0) + (useTf2 and b2 == -1 ? 1 : 0) + (useTf3 and b3 == -1 ? 1 : 0) + (useTf4 and b4 == -1 ? 1 : 0) + (useTf5 and b5 == -1 ? 1 : 0)
+int consensusBias = bullVotes > bearVotes ? 1 : bearVotes > bullVotes ? -1 : 0
+
+float chartEMA = ta.ema(close, emaLen)
+plot(showEMA ? chartEMA : na, "EMA", color = color.orange, linewidth = 1)
+
+// ============================================================================
+// 4) CONFIRMED SWING ENGINE + IMPULSE ANCHORS
+// ============================================================================
+float ph = ta.pivothigh(high, swingLen, swingLen)
+float pl = ta.pivotlow(low, swingLen, swingLen)
+
+var float latestPH = na
+var int   latestPHBar = na
+var float latestPL = na
+var int   latestPLBar = na
+
+// Stored completed impulse legs. These do not move until another pivot confirms.
+var float bullLow = na
+var int   bullLowBar = na
+var float bullHigh = na
+var int   bullHighBar = na
+var float bearHigh = na
+var int   bearHighBar = na
+var float bearLow = na
+var int   bearLowBar = na
+
+if not na(pl)
+    latestPL := pl
+    latestPLBar := bar_index - swingLen
+    if not na(latestPH) and latestPHBar < latestPLBar
+        bearHigh := latestPH
+        bearHighBar := latestPHBar
+        bearLow := pl
+        bearLowBar := latestPLBar
+
+if not na(ph)
+    latestPH := ph
+    latestPHBar := bar_index - swingLen
+    if not na(latestPL) and latestPLBar < latestPHBar
+        bullLow := latestPL
+        bullLowBar := latestPLBar
+        bullHigh := ph
+        bullHighBar := latestPHBar
+
+bool haveBullLeg = not na(bullLow) and not na(bullHigh) and bullHigh > bullLow
+bool haveBearLeg = not na(bearHigh) and not na(bearLow) and bearHigh > bearLow
+
+float legHigh = consensusBias == 1 ? bullHigh : consensusBias == -1 ? bearHigh : na
+float legLow  = consensusBias == 1 ? bullLow  : consensusBias == -1 ? bearLow  : na
+int legStartBar = consensusBias == 1 ? bullLowBar : consensusBias == -1 ? bearHighBar : na
+int legEndBar   = consensusBias == 1 ? bullHighBar : consensusBias == -1 ? bearLowBar : na
+bool haveLeg = consensusBias == 1 ? haveBullLeg : consensusBias == -1 ? haveBearLeg : false
+
+float range = haveLeg ? legHigh - legLow : na
+float r30 = cos30Input / 100.0
+float r45 = cos45Input / 100.0
+float r60 = cos60Input / 100.0
+
+// COS levels are retracements from the impulse endpoint.
+float cos30 = haveLeg ? (consensusBias == 1 ? legHigh - range * r30 : legLow + range * r30) : na
+float cos45 = haveLeg ? (consensusBias == 1 ? legHigh - range * r45 : legLow + range * r45) : na
+float cos60 = haveLeg ? (consensusBias == 1 ? legHigh - range * r60 : legLow + range * r60) : na
+
+plot(showFib ? cos30 : na, "COS30", color = color.yellow, linewidth = 2, style = plot.style_linebr)
+plot(showFib ? cos45 : na, "COS45", color = color.aqua, linewidth = 2, style = plot.style_linebr)
+plot(showFib ? cos60 : na, "COS60", color = color.lime, linewidth = 2, style = plot.style_linebr)
+
+if showSwings and not na(ph)
+    label.new(bar_index - swingLen, ph, "SH", style = label.style_label_down, color = color.new(color.red, 15), textcolor = color.white, size = size.tiny)
+if showSwings and not na(pl)
+    label.new(bar_index - swingLen, pl, "SL", style = label.style_label_up, color = color.new(color.lime, 15), textcolor = color.black, size = size.tiny)
+
+// ============================================================================
+// 5) SWING VOLUME PROFILE (bar-volume distributed across touched price rows)
+//    Forex volume is normally tick volume. This is an approximation, not bid/ask footprint.
+// ============================================================================
+var array<float> vpBins = array.new_float(0)
+var array<box> vpBoxes = array.new_box(0)
+var line pocLine = na
+var label pocLabel = na
+float pocPrice = na
+
+if barstate.islast
+    f_deleteBoxes(vpBoxes)
+    if not na(pocLine)
+        line.delete(pocLine)
+        pocLine := na
+    if not na(pocLabel)
+        label.delete(pocLabel)
+        pocLabel := na
+
+    if showVP and haveLeg and range > 0 and not na(legStartBar) and not na(legEndBar)
+        array.clear(vpBins)
+        for r = 0 to vpRows - 1
+            array.push(vpBins, 0.0)
+
+        int barsFromStart = math.max(0, bar_index - legStartBar)
+        int barsToUse = math.min(vpMaxBars, barsFromStart + 1)
+        float rowSize = range / vpRows
+
+        if rowSize > 0 and barsToUse > 0
+            for i = 0 to barsToUse - 1
+                if not na(high[i]) and not na(low[i]) and not na(volume[i])
+                    float clippedLo = math.max(legLow, low[i])
+                    float clippedHi = math.min(legHigh, high[i])
+                    if clippedHi >= clippedLo
+                        int loBin = f_clampInt(int(math.floor((clippedLo - legLow) / rowSize)), 0, vpRows - 1)
+                        int hiBin = f_clampInt(int(math.floor((clippedHi - legLow) / rowSize)), 0, vpRows - 1)
+                        int touched = math.max(1, hiBin - loBin + 1)
+                        float partVol = volume[i] / touched
+                        for r = loBin to hiBin
+                            array.set(vpBins, r, array.get(vpBins, r) + partVol)
+
+            float maxVol = array.max(vpBins)
+            int pocIdx = array.indexof(vpBins, maxVol)
+            pocPrice := legLow + rowSize * (pocIdx + 0.5)
+
+            if maxVol > 0
+                for r = 0 to vpRows - 1
+                    float v = array.get(vpBins, r)
+                    int width = int(math.round(vpWidthBars * v / maxVol))
+                    if width > 0
+                        float y1 = legLow + rowSize * r
+                        float y2 = y1 + rowSize
+                        int leftX = math.max(0, bar_index - width)
+                        color fill = r == pocIdx ? color.new(color.orange, 35) : color.new(color.blue, 78)
+                        box bx = box.new(left = leftX, top = y2, right = bar_index, bottom = y1, xloc = xloc.bar_index, bgcolor = fill, border_color = color.new(fill, 100))
+                        array.push(vpBoxes, bx)
+
+            if showPOC and not na(pocPrice)
+                pocLine := line.new(x1 = math.max(0, legStartBar), y1 = pocPrice, x2 = bar_index + 5, y2 = pocPrice, xloc = xloc.bar_index, extend = extend.none, color = color.orange, width = 2, style = line.style_dashed)
+                pocLabel := label.new(bar_index + 5, pocPrice, "POC " + str.tostring(pocPrice, format.mintick), xloc = xloc.bar_index, style = label.style_label_left, color = color.orange, textcolor = color.black, size = size.tiny)
+
+// ============================================================================
+// 6) ZONE ENGINE
+// ============================================================================
+float atr = ta.atr(14)
+float body = math.abs(close - open)
+bool bullishDisplacement = close > open and body >= atr * impulseATR
+bool bearishDisplacement = close < open and body >= atr * impulseATR
+
+var array<box> demandBoxes = array.new_box(0)
+var array<box> supplyBoxes = array.new_box(0)
+var array<box> bullFvgBoxes = array.new_box(0)
+var array<box> bearFvgBoxes = array.new_box(0)
+var array<box> bullObBoxes = array.new_box(0)
+var array<box> bearObBoxes = array.new_box(0)
+
+var float lastDemandTop = na
+var float lastDemandBot = na
+var float lastSupplyTop = na
+var float lastSupplyBot = na
+var float lastBullFvgTop = na
+var float lastBullFvgBot = na
+var float lastBearFvgTop = na
+var float lastBearFvgBot = na
+var float lastBullObTop = na
+var float lastBullObBot = na
+var float lastBearObTop = na
+var float lastBearObBot = na
+
+// Supply / Demand: last opposing candle before displacement.
+if showSD and bullishDisplacement and close > high[1]
+    lastDemandTop := high[1]
+    lastDemandBot := low[1]
+    box b = box.new(bar_index - 1, lastDemandTop, bar_index + zoneLookback, lastDemandBot, xloc = xloc.bar_index, bgcolor = color.new(color.green, 86), border_color = color.new(color.green, 25))
+    array.push(demandBoxes, b)
+    f_trimBoxes(demandBoxes, maxZonesEach)
+
+if showSD and bearishDisplacement and close < low[1]
+    lastSupplyTop := high[1]
+    lastSupplyBot := low[1]
+    box b = box.new(bar_index - 1, lastSupplyTop, bar_index + zoneLookback, lastSupplyBot, xloc = xloc.bar_index, bgcolor = color.new(color.red, 86), border_color = color.new(color.red, 25))
+    array.push(supplyBoxes, b)
+    f_trimBoxes(supplyBoxes, maxZonesEach)
+
+// FVG: 3-candle imbalance.
+bool bullFvg = low > high[2] and (low - high[2]) >= atr * minFvgATR
+bool bearFvg = high < low[2] and (low[2] - high) >= atr * minFvgATR
+
+if showFVG and bullFvg
+    lastBullFvgTop := low
+    lastBullFvgBot := high[2]
+    box b = box.new(bar_index - 2, lastBullFvgTop, bar_index + zoneLookback, lastBullFvgBot, xloc = xloc.bar_index, bgcolor = color.new(color.aqua, 88), border_color = color.new(color.aqua, 30))
+    array.push(bullFvgBoxes, b)
+    f_trimBoxes(bullFvgBoxes, maxZonesEach)
+
+if showFVG and bearFvg
+    lastBearFvgTop := low[2]
+    lastBearFvgBot := high
+    box b = box.new(bar_index - 2, lastBearFvgTop, bar_index + zoneLookback, lastBearFvgBot, xloc = xloc.bar_index, bgcolor = color.new(color.fuchsia, 89), border_color = color.new(color.fuchsia, 30))
+    array.push(bearFvgBoxes, b)
+    f_trimBoxes(bearFvgBoxes, maxZonesEach)
+
+// Order Block: last opposite candle immediately before displacement + local break.
+if showOB and bullishDisplacement and close > high[1] and close[1] < open[1]
+    lastBullObTop := high[1]
+    lastBullObBot := low[1]
+    box b = box.new(bar_index - 1, lastBullObTop, bar_index + zoneLookback, lastBullObBot, xloc = xloc.bar_index, bgcolor = color.new(color.teal, 84), border_color = color.new(color.teal, 20))
+    array.push(bullObBoxes, b)
+    f_trimBoxes(bullObBoxes, maxZonesEach)
+
+if showOB and bearishDisplacement and close < low[1] and close[1] > open[1]
+    lastBearObTop := high[1]
+    lastBearObBot := low[1]
+    box b = box.new(bar_index - 1, lastBearObTop, bar_index + zoneLookback, lastBearObBot, xloc = xloc.bar_index, bgcolor = color.new(color.purple, 84), border_color = color.new(color.purple, 20))
+    array.push(bearObBoxes, b)
+    f_trimBoxes(bearObBoxes, maxZonesEach)
+
+// ============================================================================
+// 7) CONFLUENCE + ENTRY
+// ============================================================================
+float tolerance = atr * tolATR
+bool allow30 = entryCos == "COS30" or entryCos == "COS30 + COS45"
+bool allow45 = entryCos == "COS45" or entryCos == "COS30 + COS45"
+bool near30 = allow30 and not na(cos30) and math.abs(close - cos30) <= tolerance
+bool near45 = allow45 and not na(cos45) and math.abs(close - cos45) <= tolerance
+bool cosHit = near30 or near45
+float activeCos = near45 ? cos45 : near30 ? cos30 : na
+
+bool pocConf = usePOCConf and f_near(activeCos, pocPrice, tolerance)
+bool sdConf  = useSDConf and (consensusBias == 1 ? f_inZone(activeCos, lastDemandTop, lastDemandBot) : consensusBias == -1 ? f_inZone(activeCos, lastSupplyTop, lastSupplyBot) : false)
+bool fvgConf = useFVGConf and (consensusBias == 1 ? f_inZone(activeCos, lastBullFvgTop, lastBullFvgBot) : consensusBias == -1 ? f_inZone(activeCos, lastBearFvgTop, lastBearFvgBot) : false)
+bool obConf  = useOBConf and (consensusBias == 1 ? f_inZone(activeCos, lastBullObTop, lastBullObBot) : consensusBias == -1 ? f_inZone(activeCos, lastBearObTop, lastBearObBot) : false)
+
+int enabledConf = (usePOCConf ? 1 : 0) + (useSDConf ? 1 : 0) + (useFVGConf ? 1 : 0) + (useOBConf ? 1 : 0)
+int confScore = (pocConf ? 1 : 0) + (sdConf ? 1 : 0) + (fvgConf ? 1 : 0) + (obConf ? 1 : 0)
+int needed = math.min(minConfirm, math.max(1, enabledConf))
+
+bool barOk = not confirmedOnly or barstate.isconfirmed
+bool longSignal  = barOk and consensusBias == 1 and haveBullLeg and cosHit and confScore >= needed
+bool shortSignal = barOk and consensusBias == -1 and haveBearLeg and cosHit and confScore >= needed
+
+float longSL  = haveBullLeg ? (slMode == "Swing" ? bullLow - atr * slAtrMult : close - atr * (1.0 + slAtrMult)) : na
+float shortSL = haveBearLeg ? (slMode == "Swing" ? bearHigh + atr * slAtrMult : close + atr * (1.0 + slAtrMult)) : na
+float longRisk = longSignal ? close - longSL : na
+float shortRisk = shortSignal ? shortSL - close : na
+float longTP = longSignal and longRisk > 0 ? close + longRisk * rrReward : na
+float shortTP = shortSignal and shortRisk > 0 ? close - shortRisk * rrReward : na
+
+plotshape(showEntry and longSignal, title = "BUY", style = shape.labelup, location = location.belowbar, text = "BUY", color = color.lime, textcolor = color.black, size = size.tiny)
+plotshape(showEntry and shortSignal, title = "SELL", style = shape.labeldown, location = location.abovebar, text = "SELL", color = color.red, textcolor = color.white, size = size.tiny)
+
+var line entryLine = na
+var line slLine = na
+var line tpLine = na
+var label tradeLabel = na
+
+if longSignal or shortSignal
+    if not na(entryLine)
+        line.delete(entryLine)
+    if not na(slLine)
+        line.delete(slLine)
+    if not na(tpLine)
+        line.delete(tpLine)
+    if not na(tradeLabel)
+        label.delete(tradeLabel)
+
+    float e = close
+    float s = longSignal ? longSL : shortSL
+    float t = longSignal ? longTP : shortTP
+    color sigColor = longSignal ? color.lime : color.red
+    entryLine := line.new(bar_index, e, bar_index + 25, e, xloc = xloc.bar_index, color = color.white, style = line.style_dashed)
+    slLine := line.new(bar_index, s, bar_index + 25, s, xloc = xloc.bar_index, color = color.red, style = line.style_dashed)
+    tpLine := line.new(bar_index, t, bar_index + 25, t, xloc = xloc.bar_index, color = color.lime, style = line.style_dashed)
+    tradeLabel := label.new(bar_index, e, (longSignal ? "BUY" : "SELL") + "  " + str.tostring(confScore) + "/" + str.tostring(enabledConf) + "\nRR 1:" + str.tostring(rrReward), style = longSignal ? label.style_label_up : label.style_label_down, color = sigColor, textcolor = longSignal ? color.black : color.white)
+
+alertcondition(longSignal, "COS Confluence BUY", "COS Confluence BUY signal")
+alertcondition(shortSignal, "COS Confluence SELL", "COS Confluence SELL signal")
+
+// ============================================================================
+// 8) DASHBOARD
+// ============================================================================
+var table dash = table.new(position.top_right, 4, 13, border_width = 1)
+
+if barstate.islast and showDashboard
+    table.clear(dash, 0, 0, 3, 12)
+    color headerBg = color.new(color.rgb(20, 28, 42), 0)
+    color cellBg = color.new(color.rgb(12, 18, 28), 10)
+
+    table.cell(dash, 0, 0, "COS MTF", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 1, 0, "TF", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 2, 0, "BIAS", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 3, 0, "USE", bgcolor = headerBg, text_color = color.white)
+
+    table.cell(dash, 0, 1, "1", bgcolor = cellBg)
+    table.cell(dash, 1, 1, tf1, bgcolor = cellBg)
+    table.cell(dash, 2, 1, f_biasText(b1), bgcolor = cellBg, text_color = f_biasColor(b1))
+    table.cell(dash, 3, 1, useTf1 ? "YES" : "NO", bgcolor = cellBg)
+
+    table.cell(dash, 0, 2, "2", bgcolor = cellBg)
+    table.cell(dash, 1, 2, tf2, bgcolor = cellBg)
+    table.cell(dash, 2, 2, f_biasText(b2), bgcolor = cellBg, text_color = f_biasColor(b2))
+    table.cell(dash, 3, 2, useTf2 ? "YES" : "NO", bgcolor = cellBg)
+
+    table.cell(dash, 0, 3, "3", bgcolor = cellBg)
+    table.cell(dash, 1, 3, tf3, bgcolor = cellBg)
+    table.cell(dash, 2, 3, f_biasText(b3), bgcolor = cellBg, text_color = f_biasColor(b3))
+    table.cell(dash, 3, 3, useTf3 ? "YES" : "NO", bgcolor = cellBg)
+
+    table.cell(dash, 0, 4, "4", bgcolor = cellBg)
+    table.cell(dash, 1, 4, tf4, bgcolor = cellBg)
+    table.cell(dash, 2, 4, f_biasText(b4), bgcolor = cellBg, text_color = f_biasColor(b4))
+    table.cell(dash, 3, 4, useTf4 ? "YES" : "NO", bgcolor = cellBg)
+
+    table.cell(dash, 0, 5, "5", bgcolor = cellBg)
+    table.cell(dash, 1, 5, tf5, bgcolor = cellBg)
+    table.cell(dash, 2, 5, f_biasText(b5), bgcolor = cellBg, text_color = f_biasColor(b5))
+    table.cell(dash, 3, 5, useTf5 ? "YES" : "NO", bgcolor = cellBg)
+
+    table.cell(dash, 0, 6, "Consensus", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 1, 6, f_biasText(consensusBias), bgcolor = headerBg, text_color = f_biasColor(consensusBias))
+    table.cell(dash, 2, 6, "Score", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 3, 6, str.tostring(confScore) + "/" + str.tostring(enabledConf), bgcolor = headerBg, text_color = confScore >= needed ? color.lime : color.silver)
+
+    table.cell(dash, 0, 7, "COS30", bgcolor = cellBg)
+    table.cell(dash, 1, 7, str.tostring(cos30, format.mintick), bgcolor = cellBg)
+    table.cell(dash, 2, 7, "POC", bgcolor = cellBg)
+    table.cell(dash, 3, 7, str.tostring(pocPrice, format.mintick), bgcolor = cellBg)
+
+    table.cell(dash, 0, 8, "COS45", bgcolor = cellBg)
+    table.cell(dash, 1, 8, str.tostring(cos45, format.mintick), bgcolor = cellBg)
+    table.cell(dash, 2, 8, "POC OK", bgcolor = cellBg)
+    table.cell(dash, 3, 8, pocConf ? "YES" : "NO", bgcolor = cellBg, text_color = pocConf ? color.lime : color.silver)
+
+    table.cell(dash, 0, 9, "COS60", bgcolor = cellBg)
+    table.cell(dash, 1, 9, str.tostring(cos60, format.mintick), bgcolor = cellBg)
+    table.cell(dash, 2, 9, "SD", bgcolor = cellBg)
+    table.cell(dash, 3, 9, sdConf ? "YES" : "NO", bgcolor = cellBg, text_color = sdConf ? color.lime : color.silver)
+
+    table.cell(dash, 0, 10, "FVG", bgcolor = cellBg)
+    table.cell(dash, 1, 10, fvgConf ? "YES" : "NO", bgcolor = cellBg, text_color = fvgConf ? color.lime : color.silver)
+    table.cell(dash, 2, 10, "OB", bgcolor = cellBg)
+    table.cell(dash, 3, 10, obConf ? "YES" : "NO", bgcolor = cellBg, text_color = obConf ? color.lime : color.silver)
+
+    string sig = longSignal ? "BUY" : shortSignal ? "SELL" : "WAIT"
+    color sigC = longSignal ? color.lime : shortSignal ? color.red : color.silver
+    table.cell(dash, 0, 11, "Signal", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 1, 11, sig, bgcolor = headerBg, text_color = sigC)
+    table.cell(dash, 2, 11, "RR", bgcolor = headerBg, text_color = color.white)
+    table.cell(dash, 3, 11, "1:" + str.tostring(rrReward), bgcolor = headerBg, text_color = color.white)
+
+    table.cell(dash, 0, 12, "Mode", bgcolor = cellBg)
+    table.cell(dash, 1, 12, confirmedOnly ? "Confirmed" : "Realtime", bgcolor = cellBg)
+    table.cell(dash, 2, 12, "Need", bgcolor = cellBg)
+    table.cell(dash, 3, 12, str.tostring(needed), bgcolor = cellBg)
