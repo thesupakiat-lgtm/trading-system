@@ -1,0 +1,86 @@
+{
+  "file": "COS_MTF_Smart_Money_Confluence_v2.pine",
+  "sha256": "8cd849df34ab6f7ed35eefb1cae29f0aa1337e545f2d846a069e1abd2cd7e820",
+  "lines": 835,
+  "characters": 55470,
+  "pass": 15,
+  "fail": 0,
+  "results": [
+    {
+      "check": "Pine version annotation",
+      "status": "PASS",
+      "detail": "//@version=6"
+    },
+    {
+      "check": "Indicator declaration",
+      "status": "PASS",
+      "detail": "indicator() found in global scope"
+    },
+    {
+      "check": "Balanced delimiters and strings",
+      "status": "PASS",
+      "detail": "No unmatched (), [], {}, or strings"
+    },
+    {
+      "check": "Indentation shape",
+      "status": "PASS",
+      "detail": "Four-space local blocks; no tabs"
+    },
+    {
+      "check": "Global-scope plot/fill/barcolor/alertcondition",
+      "status": "PASS",
+      "detail": "All compiler-sensitive visual/event calls are global"
+    },
+    {
+      "check": "MTF request count",
+      "status": "PASS",
+      "detail": "5 request.security() calls; below the common 40 unique-request tier"
+    },
+    {
+      "check": "Direct na comparison",
+      "status": "PASS",
+      "detail": "Uses na(x), avoiding invalid direct na comparisons"
+    },
+    {
+      "check": "Indicator-only safety",
+      "status": "PASS",
+      "detail": "No broker-emulator orders are placed"
+    },
+    {
+      "check": "Drawing declaration caps",
+      "status": "PASS",
+      "detail": "Each drawing cap is 400 (below Pine maximum 500)"
+    },
+    {
+      "check": "Historical offset guard",
+      "status": "PASS",
+      "detail": "Dynamic profile history is guarded below max_bars_back"
+    },
+    {
+      "check": "Future projection guard",
+      "status": "PASS",
+      "detail": "Zone projection input is capped at 300 bars"
+    },
+    {
+      "check": "Table bounds",
+      "status": "PASS",
+      "detail": "4 columns x 19 rows; populated indices stay within 0..3 and 0..18"
+    },
+    {
+      "check": "Zone-array synchronization structure",
+      "status": "PASS",
+      "detail": "Six zone families each contain box/top/bottom/created/active arrays and an update call"
+    },
+    {
+      "check": "Signal gating",
+      "status": "PASS",
+      "detail": "Entry-zone, location, grade, cooldown, valid-risk and confirmed-bar guards present"
+    },
+    {
+      "check": "Alert events",
+      "status": "PASS",
+      "detail": "BUY/SELL alertcondition plus dynamic BUY/SELL alert messages"
+    }
+  ],
+  "limitation": "Static validation only. The authoritative compile/runtime check remains TradingView Pine Editor because no official standalone Pine compiler is available in this environment."
+}
